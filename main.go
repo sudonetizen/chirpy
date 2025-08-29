@@ -1,45 +1,39 @@
 package main
 
 import (
+    "os"
     "fmt"
     "log"
+    "time"
     "strings"
     "net/http"
     "sync/atomic"
     "encoding/json"
+    "database/sql"
+    _ "github.com/lib/pq"
+    "github.com/joho/godotenv"
+    "github.com/google/uuid"
+    "github.com/sudonetizen/database"
 )
 
+// fileserverHits struct 
 type apiConfig struct {
     fileserverHits atomic.Int32
+    db *database.Queries
 }
 
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-    return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
-        cfg.fileserverHits.Add(1)
-        next.ServeHTTP(w, r)
-    }) 
-}
-
-func (cfg *apiConfig) handlerHits(w http.ResponseWriter, r *http.Request) {
-    w.Header().Add("Content-Type", "text/html; charset=utf-8")
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte(fmt.Sprintf(hits_templ, cfg.fileserverHits.Load())))
-}
-
-func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
-    cfg.fileserverHits.Store(0)
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte(fmt.Sprintln("reset done, hits now 0")))
-}
-
-func handlerHealthz(w http.ResponseWriter, r *http.Request) {
-    w.Header().Add("Content-Type", "text/plain; charset=utf-8")
-    w.WriteHeader(http.StatusOK)
-    w.Write([]byte(http.StatusText(http.StatusOK)))
-}
-
+// chirp structs 
 type chirp struct {
-    Body string `json:"body"`
+    Body    string `json:"body"`
+    User_id uuid.UUID `json:"user_id"`
+}
+
+type chirp_res struct {
+    Id         uuid.UUID `json:"id"`
+    Created_at time.Time `json:"created_at"`
+    Updated_at time.Time `json:"updated_at"`
+    Body       string    `json:"body"`
+    User_id    uuid.UUID `json:"user_id"`
 }
 
 type ch_res struct {
@@ -54,7 +48,59 @@ type ch_vld struct {
     Valid bool `json:"valid"`
 }
 
-func handlerJson(w http.ResponseWriter, r *http.Request) {
+// user structs
+type email struct {
+    Email string `json:"email"`
+}
+
+type user struct {
+    Id         uuid.UUID `json:"id"`
+    Created_at time.Time `json:"created_at"`
+    Updated_at time.Time `json:"updated_at"`
+    Email      string    `json:"email"`
+}
+
+// middleware that count fileserver hits by using on handler function 
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+    return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
+        cfg.fileserverHits.Add(1)
+        next.ServeHTTP(w, r)
+    }) 
+}
+
+// shows hits of fileserver
+func (cfg *apiConfig) handlerHits(w http.ResponseWriter, r *http.Request) {
+    w.Header().Add("Content-Type", "text/html; charset=utf-8")
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte(fmt.Sprintf(hits_templ, cfg.fileserverHits.Load())))
+}
+
+// handles -> post /admin/reset 
+func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+    cfg.fileserverHits.Store(0)
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte(fmt.Sprintln("reset done, hits now 0")))
+
+    err := cfg.db.DeleteUsers(r.Context())
+    if err != nil {
+        log.Printf("error with marshalling ch_err: %v\n", err)
+        w.WriteHeader(500)
+    }
+
+    log.Printf("deleted users")
+    
+}
+
+// for checking health of web app
+func handlerHealthz(w http.ResponseWriter, r *http.Request) {
+    w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte(http.StatusText(http.StatusOK)))
+}
+
+// handles -> post /api/chirps 
+func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
+    // decoding chirp message
     msg := chirp{}
     decoder := json.NewDecoder(r.Body)
     err := decoder.Decode(&msg)
@@ -64,6 +110,14 @@ func handlerJson(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(500)
         return
     } 
+
+    // checking user_id 
+    _, err = cfg.db.GetUser(r.Context(), msg.User_id)
+    if err != nil {
+        log.Printf("error with checking user_id: %v\n", err)
+        w.WriteHeader(500)
+        return 
+        }
 
     // checking for length
     if len(msg.Body) > 140 {
@@ -91,28 +145,79 @@ func handlerJson(w http.ResponseWriter, r *http.Request) {
         if ok { msgString = strings.ReplaceAll(msgString, word, "****") }
     }
 
-    // sending response 
-    
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(200)
-
-    res_msg := ch_res{BodyClean: msgString}
-    data, err := json.Marshal(res_msg)
+    // creating a chirp and sending response 
+    chrp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{msgString, msg.User_id})
     if err != nil {
-        log.Printf("error with marshalling ch_err: %v\n", err)
+        log.Printf("error with creating chirp: %v\n", err)
+        w.WriteHeader(500)
+        return 
+    }
+
+    chirpRes := chirp_res{Id: chrp.ID, Created_at: chrp.CreatedAt, Updated_at: chrp.UpdatedAt, Body: chrp.Body, User_id: chrp.UserID}
+    data, err := json.Marshal(chirpRes)
+    if err != nil {
+        log.Printf("error with creating res json: %v\n", err)
         w.WriteHeader(500)
         return 
     }
     
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(201)
+    w.Write(data)
+}
+
+// handles -> post /api/users
+func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
+    // decoding email struct 
+    eml := email{}
+    decoder := json.NewDecoder(r.Body)
+    err := decoder.Decode(&eml)
+
+    if err != nil {
+        log.Printf("error with decoding: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+
+    // creating user
+    usr, err := cfg.db.CreateUser(r.Context(), eml.Email)
+      
+    if err != nil {
+        log.Printf("error with creating user: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+
+    // sending response 
+    res := user{Id: usr.ID, Created_at: usr.CreatedAt, Updated_at: usr.UpdatedAt, Email: usr.Email}
+    data, err := json.Marshal(res)
+    
+    if err != nil {
+        log.Printf("error with creating json: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+
+    w.Header().Set("Content-Type", "application/json") 
+    w.WriteHeader(201)
     w.Write(data)
 }
 
 func main() {
+    // get DB_URL
+    godotenv.Load()
+    dbURL := os.Getenv("DB_URL")
+    // connection to database
+    db, err := sql.Open("postgres", dbURL)
+    dbQueries := database.New(db)
+
     mux := http.NewServeMux()
-    apiCfg := &apiConfig{fileserverHits: atomic.Int32{}} 
+    apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries} 
+
     mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
     mux.HandleFunc("GET /api/healthz",  handlerHealthz)
-    mux.HandleFunc("POST /api/validate_chirp", handlerJson)
+    mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirps)
+    mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
     mux.HandleFunc("GET /admin/metrics", apiCfg.handlerHits)
     mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
    
@@ -122,6 +227,6 @@ func main() {
     }
 
     log.Println("serving on port 8080")
-    err := srv.ListenAndServe()
+    err = srv.ListenAndServe()
     if err != nil {log.Fatal(err)}
 }
