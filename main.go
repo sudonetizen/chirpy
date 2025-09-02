@@ -203,6 +203,73 @@ func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
     w.Write(data)
 }
 
+// handles -> get /api/chirps
+func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+    // getting chirps
+    chirps, err := cfg.db.GetChirps(r.Context())
+
+    if err != nil {
+        log.Printf("error with getting chirps: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+    
+    // encoding chirps 
+    chirps_list := []chirp_res{} 
+    for _, ch := range chirps {
+        chch := chirp_res{ch.ID, ch.CreatedAt, ch.UpdatedAt, ch.Body, ch.UserID}
+        chirps_list = append(chirps_list, chch)
+    }    
+
+    data, err := json.Marshal(chirps_list)
+    
+    if err != nil {
+        log.Printf("error with marshalling chirps: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+
+    // sending response 
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(200) 
+    w.Write(data)
+}
+
+// handles -> get /api/chirps/chirpID 
+func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
+    // getting chirp 
+    id, err := uuid.Parse(r.PathValue("chirpID"))
+    if err != nil {
+        log.Printf("error with parsing uuid: %v\n", err) 
+        w.WriteHeader(400)
+        w.Write([]byte("chirp id is invalid"))
+        return
+    }
+
+    chp, err := cfg.db.GetChirp(r.Context(), id)
+
+    if err != nil {
+        log.Printf("error with getting chirp: %v\n", err)
+        w.WriteHeader(404)
+        return
+    } 
+    
+    // encoding 
+    chch := chirp_res{chp.ID, chp.CreatedAt, chp.UpdatedAt, chp.Body, chp.UserID}
+    dta, err := json.Marshal(chch)
+
+    if err != nil {
+        log.Printf("error with marshalling chirp: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+ 
+    // response 
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(200) 
+    w.Write(dta)
+}
+
 func main() {
     // get DB_URL
     godotenv.Load()
@@ -216,8 +283,13 @@ func main() {
 
     mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
     mux.HandleFunc("GET /api/healthz",  handlerHealthz)
+
+    mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirp)
+    mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
     mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirps)
+
     mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
+
     mux.HandleFunc("GET /admin/metrics", apiCfg.handlerHits)
     mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
    
