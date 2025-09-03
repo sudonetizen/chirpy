@@ -13,6 +13,7 @@ import (
     _ "github.com/lib/pq"
     "github.com/joho/godotenv"
     "github.com/google/uuid"
+    "github.com/sudonetizen/auth"
     "github.com/sudonetizen/database"
 )
 
@@ -50,7 +51,8 @@ type ch_vld struct {
 
 // user structs
 type email struct {
-    Email string `json:"email"`
+    Password string `json:"password"`
+    Email    string `json:"email"`
 }
 
 type user struct {
@@ -83,7 +85,7 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 
     err := cfg.db.DeleteUsers(r.Context())
     if err != nil {
-        log.Printf("error with marshalling ch_err: %v\n", err)
+        log.Printf("error with deleting users: %v\n", err)
         w.WriteHeader(500)
     }
 
@@ -107,7 +109,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 
     if err != nil {
         log.Printf("error with decoding: %v\n", err)
-        w.WriteHeader(500)
+        w.WriteHeader(400)
         return
     } 
 
@@ -115,7 +117,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
     _, err = cfg.db.GetUser(r.Context(), msg.User_id)
     if err != nil {
         log.Printf("error with checking user_id: %v\n", err)
-        w.WriteHeader(500)
+        w.WriteHeader(400)
         return 
         }
 
@@ -168,19 +170,28 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 
 // handles -> post /api/users
 func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
-    // decoding email struct 
+    // decoding email and password into struct 
     eml := email{}
     decoder := json.NewDecoder(r.Body)
     err := decoder.Decode(&eml)
 
     if err != nil {
         log.Printf("error with decoding: %v\n", err)
-        w.WriteHeader(500)
+        w.WriteHeader(400)
         return
     } 
 
+    // hashing password 
+    hash, err := auth.HashPassword(eml.Password)
+    
+    if err != nil {
+        log.Printf("error with hashing: %v\n", err)
+        w.WriteHeader(500)
+        return 
+    }
+    
     // creating user
-    usr, err := cfg.db.CreateUser(r.Context(), eml.Email)
+    usr, err := cfg.db.CreateUser(r.Context(), database.CreateUserParams{eml.Email, hash})
       
     if err != nil {
         log.Printf("error with creating user: %v\n", err)
@@ -270,6 +281,55 @@ func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
     w.Write(dta)
 }
 
+// handles -> post /api/login
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+    // decoding password and email from request into struct
+    eml := email{}
+    decoder := json.NewDecoder(r.Body)
+    err := decoder.Decode(&eml)
+
+    if err != nil {
+        log.Printf("error with decoding: %v\n", err)
+        w.WriteHeader(400)
+        return
+    }
+
+    // getting user by email  
+    usr, err := cfg.db.GetUserByEml(r.Context(), eml.Email)
+    
+    if err != nil {
+        log.Printf("error with getting user by email: %v\n", err)
+        w.WriteHeader(401)
+        w.Write([]byte("incorrect email"))
+        return 
+    }
+
+    // checking password 
+    err = auth.CheckPasswordHash(eml.Password, usr.HashedPassword)
+    
+    if err != nil {
+        log.Printf("error with checking password hash: %v\n", err)
+        w.WriteHeader(401)
+        w.Write([]byte("incorrect password"))
+        return 
+    }
+
+    // encoding response 
+    resp := user{usr.ID, usr.CreatedAt, usr.UpdatedAt, usr.Email}
+    data, err := json.Marshal(resp) 
+
+    if err != nil {
+        log.Printf("error with encoding json: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+    
+    // sending response 
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(200) 
+    w.Write(data)
+}
+
 func main() {
     // get DB_URL
     godotenv.Load()
@@ -288,6 +348,7 @@ func main() {
     mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
     mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirps)
 
+    mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
     mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 
     mux.HandleFunc("GET /admin/metrics", apiCfg.handlerHits)
