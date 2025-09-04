@@ -21,6 +21,7 @@ import (
 type apiConfig struct {
     fileserverHits atomic.Int32
     db *database.Queries
+    tks string
 }
 
 // chirp structs 
@@ -51,8 +52,9 @@ type ch_vld struct {
 
 // user structs
 type email struct {
-    Password string `json:"password"`
-    Email    string `json:"email"`
+    Password string        `json:"password"`
+    Email    string        `json:"email"`
+    Expires  time.Duration `json:"expires_in_seconds"`
 }
 
 type user struct {
@@ -60,6 +62,13 @@ type user struct {
     Created_at time.Time `json:"created_at"`
     Updated_at time.Time `json:"updated_at"`
     Email      string    `json:"email"`
+    Token      string    `json:"token"`
+    RToken     string    `json:"refresh_token"`
+}
+
+// token struct
+type tokenStruct struct {
+    Token string `json:"token"`
 }
 
 // middleware that count fileserver hits by using on handler function 
@@ -113,10 +122,29 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
         return
     } 
 
+    // getting token from header
+    ss, err := auth.GetBearerToken(r.Header)
+    if err != nil {
+        log.Printf("error with getting token: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // validating JWT 
+    userid, err := auth.ValidateJWT(ss, cfg.tks)
+    if err != nil {
+        log.Printf("error with validating jwt: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    msg.User_id = userid
+
     // checking user_id 
     _, err = cfg.db.GetUser(r.Context(), msg.User_id)
     if err != nil {
-        log.Printf("error with checking user_id: %v\n", err)
+        log.Printf("smth: %v\n", msg.User_id)
+        log.Printf("error with 1111 checking user_id: %v\n", err)
         w.WriteHeader(400)
         return 
         }
@@ -147,7 +175,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
         if ok { msgString = strings.ReplaceAll(msgString, word, "****") }
     }
 
-    // creating a chirp and sending response 
+    // creating a chirp response 
     chrp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{msgString, msg.User_id})
     if err != nil {
         log.Printf("error with creating chirp: %v\n", err)
@@ -155,6 +183,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
         return 
     }
 
+    // encoding response 
     chirpRes := chirp_res{Id: chrp.ID, Created_at: chrp.CreatedAt, Updated_at: chrp.UpdatedAt, Body: chrp.Body, User_id: chrp.UserID}
     data, err := json.Marshal(chirpRes)
     if err != nil {
@@ -163,6 +192,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
         return 
     }
     
+    // sending response 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(201)
     w.Write(data)
@@ -199,7 +229,7 @@ func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
         return
     } 
 
-    // sending response 
+    // encoding response 
     res := user{Id: usr.ID, Created_at: usr.CreatedAt, Updated_at: usr.UpdatedAt, Email: usr.Email}
     data, err := json.Marshal(res)
     
@@ -209,6 +239,7 @@ func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
         return
     } 
 
+    // sending response 
     w.Header().Set("Content-Type", "application/json") 
     w.WriteHeader(201)
     w.Write(data)
@@ -294,6 +325,9 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // checking expires_in_seconds 
+    if eml.Expires == 0 {eml.Expires = time.Duration(3600 * time.Second)}
+
     // getting user by email  
     usr, err := cfg.db.GetUserByEml(r.Context(), eml.Email)
     
@@ -314,8 +348,35 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
         return 
     }
 
+    // creating token 
+    tokenU, err := auth.MakeJWT(usr.ID, cfg.tks, eml.Expires)
+
+    if err != nil {
+        log.Printf("error with creating token: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // creating refresh token
+    rtkn, err := auth.MakeRefreshToken()
+    
+    if err != nil {
+        log.Printf("error with creating refresh token: %v\n", err)
+        w.WriteHeader(500)
+        return 
+    }
+
+    // saving refresh token to database 
+    _, err = cfg.db.CreateRToken(r.Context(), database.CreateRTokenParams{rtkn, usr.ID, time.Now().Add((60*24*3600) * time.Second)})
+
+    if err != nil {
+        log.Printf("error with saving rtoken: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
     // encoding response 
-    resp := user{usr.ID, usr.CreatedAt, usr.UpdatedAt, usr.Email}
+    resp := user{usr.ID, usr.CreatedAt, usr.UpdatedAt, usr.Email, tokenU, rtkn}
     data, err := json.Marshal(resp) 
 
     if err != nil {
@@ -330,16 +391,95 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
     w.Write(data)
 }
 
+// handles -> post /api/refresh 
+func (cfg *apiConfig) handlerRefresh(w http.ResponseWriter, r *http.Request) {
+    // getting token 
+    tkn, err := auth.GetBearerToken(r.Header)
+    
+    if err != nil {
+        log.Printf("error with getting token: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+    
+    // searching token in database and checking expire time for nil 
+    rtkn, err := cfg.db.GetRToken(r.Context(), tkn)
+    
+    if err != nil {
+        log.Printf("error with searching token: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    nullTime := time.Time{}
+    if rtkn.RevokedAt.Time != nullTime {
+        log.Println("error with revoked time")
+        w.WriteHeader(401)
+        return
+    }
+    
+    // creating new token  
+    ss, err := auth.MakeJWT(rtkn.UserID, cfg.tks, time.Duration(3600 * time.Second))
+
+    if err != nil {
+        log.Printf("error with creating token: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // encoding response 
+    resp := tokenStruct{Token: ss}
+    data, err := json.Marshal(resp) 
+    
+    if err != nil {
+        log.Printf("error with marshalling json: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // sending response 
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(200) 
+    w.Write(data)
+}
+
+// handles -> post /api/revoke 
+func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
+    // getting token 
+    tkn, err := auth.GetBearerToken(r.Header)
+    
+    if err != nil {
+        log.Printf("error with getting token: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+    
+    // updating refresh token's updated_at and revoked_at timestamps 
+    err = cfg.db.UpdateRToken(r.Context(), tkn)  
+
+    if err != nil {
+        log.Printf("error with updating token: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // response 
+    w.WriteHeader(204) 
+}
+
+
 func main() {
     // get DB_URL
     godotenv.Load()
     dbURL := os.Getenv("DB_URL")
+    tknS := os.Getenv("SECRET")
+    if tknS == "" {log.Fatal("secret is not set")}
     // connection to database
     db, err := sql.Open("postgres", dbURL)
     dbQueries := database.New(db)
 
     mux := http.NewServeMux()
-    apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries} 
+    apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries, tks: tknS} 
 
     mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
     mux.HandleFunc("GET /api/healthz",  handlerHealthz)
@@ -348,6 +488,8 @@ func main() {
     mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
     mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirps)
 
+    mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
+    mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
     mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
     mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 
