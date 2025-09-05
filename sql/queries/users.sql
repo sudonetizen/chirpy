@@ -11,3 +11,8 @@ SELECT * FROM users WHERE id = $1;
 
 -- name: GetUserByEml :one
 SELECT * FROM users WHERE email = $1;
+
+-- name: UpdateUser :exec
+UPDATE users 
+SET updated_at = NOW(), email = $1, hashed_password = $2 
+WHERE id = $3;

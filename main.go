@@ -51,6 +51,10 @@ type ch_vld struct {
 }
 
 // user structs
+type onlyEmail struct {
+    Email string `json:"email"`
+}
+
 type email struct {
     Password string        `json:"password"`
     Email    string        `json:"email"`
@@ -467,6 +471,69 @@ func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
     w.WriteHeader(204) 
 }
 
+// handles -> put /api/users 
+func (cfg *apiConfig) handlerUUpdate(w http.ResponseWriter, r *http.Request) {
+    // getting token 
+    tkn, err := auth.GetBearerToken(r.Header)
+    
+    if err != nil {
+        log.Printf("476 error with getting token: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // validating JWT 
+    userid, err := auth.ValidateJWT(tkn, cfg.tks)
+    if err != nil {
+        log.Printf("484 error with validating jwt: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // decoding request 
+    eml := email{}
+    decoder := json.NewDecoder(r.Body)
+    err = decoder.Decode(&eml)
+    
+    if err != nil {
+        log.Printf("495 error with decoding request: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // hashing password 
+    hashed, err := auth.HashPassword(eml.Password)
+ 
+    if err != nil {
+        log.Printf("504 error with hashing password: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // updating user's email and password at database
+    err = cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{eml.Email, hashed, userid})
+    
+    if err != nil {
+        log.Printf("512 error with updating user: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // encoding response
+    res := onlyEmail{eml.Email}
+    data, err := json.Marshal(res)
+
+    if err != nil {
+        log.Printf("522 error with marshalling json: %v\n", err)
+        w.WriteHeader(500)
+        return
+    }
+
+    // sending response 
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(200) 
+    w.Write(data)
+}
 
 func main() {
     // get DB_URL
@@ -492,6 +559,7 @@ func main() {
     mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
     mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
     mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
+    mux.HandleFunc("PUT /api/users", apiCfg.handlerUUpdate)
 
     mux.HandleFunc("GET /admin/metrics", apiCfg.handlerHits)
     mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
