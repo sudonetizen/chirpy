@@ -68,11 +68,22 @@ type user struct {
     Email      string    `json:"email"`
     Token      string    `json:"token"`
     RToken     string    `json:"refresh_token"`
+    Red        bool      `json:"is_chirpy_red"`
 }
 
 // token struct
 type tokenStruct struct {
     Token string `json:"token"`
+}
+
+// polka webhook
+type pData struct {
+    UserID uuid.UUID `json:"user_id"`
+}
+
+type pWebhook struct {
+    Event string `json:"event"`
+    Data  pData  `json:"data"`
 }
 
 // middleware that count fileserver hits by using on handler function 
@@ -234,7 +245,7 @@ func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
     } 
 
     // encoding response 
-    res := user{Id: usr.ID, Created_at: usr.CreatedAt, Updated_at: usr.UpdatedAt, Email: usr.Email}
+    res := user{Id: usr.ID, Created_at: usr.CreatedAt, Updated_at: usr.UpdatedAt, Email: usr.Email, Red: usr.IsChirpyRed.Bool}
     data, err := json.Marshal(res)
     
     if err != nil {
@@ -380,7 +391,7 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
     }
 
     // encoding response 
-    resp := user{usr.ID, usr.CreatedAt, usr.UpdatedAt, usr.Email, tokenU, rtkn}
+    resp := user{usr.ID, usr.CreatedAt, usr.UpdatedAt, usr.Email, tokenU, rtkn, usr.IsChirpyRed.Bool}
     data, err := json.Marshal(resp) 
 
     if err != nil {
@@ -592,6 +603,39 @@ func (cfg *apiConfig) handlerDelChirp(w http.ResponseWriter, r *http.Request) {
     
 }
 
+// handles -> post /api/polka/webhooks
+func (cfg *apiConfig) handlerPWH(w http.ResponseWriter, r *http.Request) {
+    // decoding request
+    pwh := pWebhook{}
+    decoder := json.NewDecoder(r.Body)
+    err := decoder.Decode(&pwh)
+
+    if err != nil {
+        log.Printf("error with decoding request: %v\n", err)
+        w.WriteHeader(401)
+        return 
+    }  
+
+    // checking event 
+    if pwh.Event != "user.upgraded" {
+        log.Printf("invalid event")
+        w.WriteHeader(204)
+        return 
+    }
+
+    // updating user to red membership
+    err = cfg.db.UpdateRed(r.Context(), database.UpdateRedParams{sql.NullBool{Bool: true, Valid: true}, pwh.Data.UserID})
+
+    if err != nil {
+        log.Printf("error with updating membership: %v\n", err)
+        w.WriteHeader(404)
+        return 
+    }  
+
+    // response 
+    w.WriteHeader(204) 
+}
+
 func main() {
     // get DB_URL
     godotenv.Load()
@@ -607,6 +651,8 @@ func main() {
 
     mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
     mux.HandleFunc("GET /api/healthz",  handlerHealthz)
+
+    mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerPWH)
 
     mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerDelChirp)
     mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirp)
