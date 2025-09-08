@@ -535,6 +535,63 @@ func (cfg *apiConfig) handlerUUpdate(w http.ResponseWriter, r *http.Request) {
     w.Write(data)
 }
 
+// handles -> delete /api/chirps/{chirpID}
+func (cfg *apiConfig) handlerDelChirp(w http.ResponseWriter, r *http.Request) {
+    // getting token 
+    tkn, err := auth.GetBearerToken(r.Header)
+    
+    if err != nil {
+        log.Printf("error with getting token: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // validating JWT 
+    userid, err := auth.ValidateJWT(tkn, cfg.tks)
+    if err != nil {
+        log.Printf("error with validating jwt: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // getting chirp 
+    id, err := uuid.Parse(r.PathValue("chirpID"))
+    if err != nil {
+        log.Printf("error with parsing uuid: %v\n", err) 
+        w.WriteHeader(400)
+        w.Write([]byte("chirp id is invalid"))
+        return
+    }
+
+    chp, err := cfg.db.GetChirp(r.Context(), id)
+
+    if err != nil {
+        log.Printf("error with getting chirp: %v\n", err)
+        w.WriteHeader(404)
+        return
+    } 
+    
+    // checking user match 
+    if userid != chp.UserID {
+        log.Println("error with user match")
+        w.WriteHeader(403)
+        return 
+    }
+
+    // deleting chirp 
+    err = cfg.db.DelChirp(r.Context(), chp.ID)
+    
+    if err != nil {
+        log.Printf("error with deleting chirp: %v\n", err)
+        w.WriteHeader(500)
+        return
+    } 
+
+    // response
+    w.WriteHeader(204)
+    
+}
+
 func main() {
     // get DB_URL
     godotenv.Load()
@@ -551,6 +608,7 @@ func main() {
     mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
     mux.HandleFunc("GET /api/healthz",  handlerHealthz)
 
+    mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerDelChirp)
     mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerGetChirp)
     mux.HandleFunc("GET /api/chirps", apiCfg.handlerGetChirps)
     mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirps)
