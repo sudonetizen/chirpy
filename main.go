@@ -5,6 +5,7 @@ import (
     "fmt"
     "log"
     "time"
+    "sort"
     "strings"
     "net/http"
     "sync/atomic"
@@ -22,6 +23,7 @@ type apiConfig struct {
     fileserverHits atomic.Int32
     db *database.Queries
     tks string
+    plk string
 }
 
 // chirp structs 
@@ -262,6 +264,27 @@ func (cfg *apiConfig) handlerUsers(w http.ResponseWriter, r *http.Request) {
 
 // handles -> get /api/chirps
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+    // getting for a author query 
+    author_id := uuid.Nil
+    qVal := r.URL.Query().Get("author_id")
+
+    if qVal != "" {
+        aid, err := uuid.Parse(qVal)
+
+        if err != nil {
+            log.Printf("error with parsing uuid: %v\n", err)
+            w.WriteHeader(401)
+            return
+        }
+        
+        author_id = aid
+    }
+
+    // checking for sort query 
+    ascFlag := true
+    sVal := r.URL.Query().Get("sort")
+    if sVal == "desc" {ascFlag = false}
+     
     // getting chirps
     chirps, err := cfg.db.GetChirps(r.Context())
 
@@ -275,8 +298,19 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
     chirps_list := []chirp_res{} 
     for _, ch := range chirps {
         chch := chirp_res{ch.ID, ch.CreatedAt, ch.UpdatedAt, ch.Body, ch.UserID}
-        chirps_list = append(chirps_list, chch)
+        if author_id == uuid.Nil {
+            chirps_list = append(chirps_list, chch)
+        } else if author_id == ch.UserID {
+            chirps_list = append(chirps_list, chch)
+        }
     }    
+
+    // sorting asc (default) or desc 
+    if ascFlag == true {
+        sort.Slice(chirps_list, func(i, j int) bool {return chirps_list[i].Created_at.Before(chirps_list[j].Created_at)})
+    } else {
+        sort.Slice(chirps_list, func(i, j int) bool {return chirps_list[i].Created_at.After(chirps_list[j].Created_at)})
+    }
 
     data, err := json.Marshal(chirps_list)
     
@@ -605,10 +639,26 @@ func (cfg *apiConfig) handlerDelChirp(w http.ResponseWriter, r *http.Request) {
 
 // handles -> post /api/polka/webhooks
 func (cfg *apiConfig) handlerPWH(w http.ResponseWriter, r *http.Request) {
+    // getting api key 
+    key, err := auth.GetAPIKey(r.Header)
+    
+    if err != nil {
+        log.Printf("error with getting api key: %v\n", err)
+        w.WriteHeader(401)
+        return
+    }
+
+    // checking api key 
+    if key != cfg.plk {
+        log.Printf("not matching\n")
+        w.WriteHeader(401)
+        return
+    }
+
     // decoding request
     pwh := pWebhook{}
     decoder := json.NewDecoder(r.Body)
-    err := decoder.Decode(&pwh)
+    err = decoder.Decode(&pwh)
 
     if err != nil {
         log.Printf("error with decoding request: %v\n", err)
@@ -641,13 +691,14 @@ func main() {
     godotenv.Load()
     dbURL := os.Getenv("DB_URL")
     tknS := os.Getenv("SECRET")
+    polka := os.Getenv("POLKA")
     if tknS == "" {log.Fatal("secret is not set")}
     // connection to database
     db, err := sql.Open("postgres", dbURL)
     dbQueries := database.New(db)
 
     mux := http.NewServeMux()
-    apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries, tks: tknS} 
+    apiCfg := &apiConfig{fileserverHits: atomic.Int32{}, db: dbQueries, tks: tknS, plk: polka} 
 
     mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
     mux.HandleFunc("GET /api/healthz",  handlerHealthz)
